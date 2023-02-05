@@ -6,7 +6,7 @@ use log::LevelFilter;
 use ring::aead;
 use smol::{
     future::FutureExt,
-    net::{TcpListener, TcpStream, UdpSocket},
+    net::{resolve, SocketAddr, TcpListener, TcpStream, UdpSocket},
     Task,
 };
 
@@ -254,9 +254,27 @@ fn main() {
             log::info!("listening on {}, tunneling via {}", local, remote);
             log::info!("algorithm: {}", algorithm_name);
             log::info!("settings: {:?}", config);
-            let udp = UdpSocket::bind(":::0").await.unwrap();
-            udp.connect(remote).await.unwrap();
-            client(local.to_string(), aead, udp, config).await.unwrap();
+            let remote_addrs = resolve(remote).await.unwrap();
+            for remote in remote_addrs.iter() {
+                match remote {
+                    SocketAddr::V4(remote) => {
+                        let Ok(udp) = UdpSocket::bind("0.0.0.0:0").await else {continue;};
+                        if udp.connect(remote).await.is_err() {
+                            continue;
+                        }
+                        client(local.to_string(), aead, udp, config).await.unwrap();
+                        break;
+                    }
+                    SocketAddr::V6(remote) => {
+                        let Ok(udp) = UdpSocket::bind("[::]:0").await else {continue;};
+                        if udp.connect(remote).await.is_err() {
+                            continue;
+                        }
+                        client(local.to_string(), aead, udp, config).await.unwrap();
+                        break;
+                    }
+                }
+            }
         } else if matches.is_present("server") {
             log::info!("ap-kcp-tun server");
             log::info!("listening on {}, tunneling to {}", local, remote);
