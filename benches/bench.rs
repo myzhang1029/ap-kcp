@@ -4,8 +4,11 @@ use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use rand::prelude::*;
 #[cfg(features = "crypto_support")]
 use ring::aead;
-use smol::{net::UdpSocket, prelude::*};
 use std::{fs::File, sync::Arc};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UdpSocket,
+};
 
 pub const DATA_SIZE: usize = 0x1000000 * 4; // 64 MB
 
@@ -28,26 +31,24 @@ fn init() {
     std::env::set_var("SMOL_THREADS", "8");
 }
 
-pub fn udp(data: Arc<Vec<u8>>) {
-    smol::block_on(async move {
-        let (io1, io2) = get_udp_pair().await;
-        let handle1 = ap_kcp::KcpHandle::new(io1, ap_kcp::KcpConfig::default()).unwrap();
-        let data1 = data.clone();
-        let t = smol::spawn(async move {
-            let listener = ap_kcp::udp::UdpListener::new(io2);
-            let session = listener.accept().await;
-            let handle2 = ap_kcp::KcpHandle::new(session, ap_kcp::KcpConfig::default()).unwrap();
-            let mut stream2 = handle2.accept().await.unwrap();
-            let mut buf = Vec::new();
-            buf.resize(data1.len(), 0);
-            stream2.read_exact(&mut buf).await.unwrap();
-            stream2.close().await.unwrap();
-        });
-        let mut stream1 = handle1.connect().await.unwrap();
-        stream1.write_all(&data).await.unwrap();
-        stream1.close().await.unwrap();
-        t.await;
+pub async fn udp(data: Arc<Vec<u8>>) {
+    let (io1, io2) = get_udp_pair().await;
+    let handle1 = ap_kcp::KcpHandle::new(io1, ap_kcp::KcpConfig::default()).unwrap();
+    let data1 = data.clone();
+    let t = tokio::spawn(async move {
+        let listener = ap_kcp::udp::UdpListener::new(io2);
+        let session = listener.accept().await;
+        let handle2 = ap_kcp::KcpHandle::new(session, ap_kcp::KcpConfig::default()).unwrap();
+        let mut stream2 = handle2.accept().await.unwrap();
+        let mut buf = Vec::new();
+        buf.resize(data1.len(), 0);
+        stream2.read_exact(&mut buf).await.unwrap();
+        stream2.shutdown().await.unwrap();
     });
+    let mut stream1 = handle1.connect().await.unwrap();
+    stream1.write_all(&data).await.unwrap();
+    stream1.shutdown().await.unwrap();
+    t.await.unwrap();
 }
 
 #[cfg(features = "crypto_support")]
@@ -55,7 +56,7 @@ pub fn udp_crypto(data: Arc<Vec<u8>>) {
     smol::block_on(async move {
         let (io1, io2) = get_udp_pair().await;
         let data1 = data.clone();
-        let t = smol::spawn(async move {
+        let t = tokio::spawn(async move {
             let listener = ap_kcp::udp::UdpListener::new(io2);
             let session = listener.accept().await;
             let aead = AeadCrypto::new(b"keykeykey", &aead::AES_256_GCM);
@@ -87,7 +88,7 @@ pub fn xmit_benchmark(c: &mut Criterion) {
     {
         let guard = pprof::ProfilerGuard::new(1000).unwrap();
         if let Ok(report) = guard.report().build() {
-            println!("report: {}", &report);
+            println!("report: {:?}", &report);
         };
         group.bench_function("udp-flamegraph", |b| b.iter(|| udp(data.clone())));
         if let Ok(report) = guard.report().build() {

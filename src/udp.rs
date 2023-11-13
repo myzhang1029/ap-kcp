@@ -1,27 +1,21 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use smol::{
-    channel::{bounded, Receiver, Sender},
-    net::UdpSocket,
-    Task,
-};
+use async_channel::{bounded, Receiver, Sender};
+use tokio::net::UdpSocket;
 
-use crate::{error::KcpResult, KcpIo};
+use crate::KcpIo;
 
 const UDP_MTU: usize = 0x1000;
 
 #[async_trait::async_trait]
-impl KcpIo for smol::net::UdpSocket {
+impl KcpIo for tokio::net::UdpSocket {
     async fn send_packet(&self, buf: &mut Vec<u8>) -> std::io::Result<()> {
         self.send(buf).await?;
         Ok(())
     }
 
     async fn recv_packet(&self) -> std::io::Result<Vec<u8>> {
-        let mut buf = Vec::with_capacity(UDP_MTU);
-        unsafe {
-            buf.set_len(UDP_MTU);
-        }
+        let mut buf = vec![0; UDP_MTU];
         let size = self.recv(&mut buf).await?;
         buf.truncate(size);
         Ok(buf)
@@ -30,7 +24,6 @@ impl KcpIo for smol::net::UdpSocket {
 
 pub struct UdpListener {
     accept_rx: Receiver<UdpSession>,
-    _task: Task<KcpResult<()>>,
 }
 
 impl UdpListener {
@@ -41,43 +34,40 @@ impl UdpListener {
     pub fn new(udp: UdpSocket) -> Self {
         let udp = Arc::new(udp);
         let (accept_tx, accept_rx) = bounded(0x10);
-        let _task = {
-            let mut sessions = HashMap::<String, Sender<Vec<u8>>>::new();
-            smol::spawn(async move {
-                loop {
-                    let mut buf = Vec::with_capacity(UDP_MTU);
-                    unsafe {
-                        buf.set_len(UDP_MTU);
-                    }
-                    let (size, addr) = udp.recv_from(&mut buf).await?;
-                    buf.truncate(size);
-                    let mut should_clean = false;
-                    if let Some(tx) = sessions.get(&addr.to_string()) {
-                        if tx.is_closed() {
-                            should_clean = true;
-                        } else if tx.try_send(buf).is_err() {
-                            log::debug!("the channel got jammed {}", addr);
-                        }
-                    } else {
-                        let (tx, rx) = bounded(0x200);
-                        sessions.insert(addr.to_string(), tx.clone());
-                        let session = UdpSession {
-                            udp: udp.clone(),
-                            rx,
-                            remote: addr,
-                        };
-                        accept_tx.send(session).await.unwrap();
-                        tx.send(buf).await.unwrap();
+        let mut sessions = HashMap::<String, Sender<Vec<u8>>>::new();
+        tokio::spawn(async move {
+            loop {
+                let mut buf = vec![0; UDP_MTU];
+                let (size, addr) = udp.recv_from(&mut buf).await?;
+                buf.truncate(size);
+                let mut should_clean = false;
+                if let Some(tx) = sessions.get(&addr.to_string()) {
+                    if tx.is_closed() {
                         should_clean = true;
+                    } else if tx.try_send(buf).is_err() {
+                        log::debug!("the channel got jammed {}", addr);
                     }
-                    if should_clean {
-                        log::info!("cleaning dead session...");
-                        sessions.retain(|_, tx| !tx.is_closed());
-                    }
+                } else {
+                    let (tx, rx) = bounded(0x200);
+                    sessions.insert(addr.to_string(), tx.clone());
+                    let session = UdpSession {
+                        udp: udp.clone(),
+                        rx,
+                        remote: addr,
+                    };
+                    accept_tx.send(session).await.unwrap();
+                    tx.send(buf).await.unwrap();
+                    should_clean = true;
                 }
-            })
-        };
-        Self { _task, accept_rx }
+                if should_clean {
+                    log::info!("cleaning dead session...");
+                    sessions.retain(|_, tx| !tx.is_closed());
+                }
+            }
+            #[allow(unreachable_code)]
+            std::io::Result::Ok(())
+        });
+        Self { accept_rx }
     }
 }
 
@@ -95,6 +85,7 @@ impl Drop for UdpSession {
 
 impl UdpSession {
     #[inline]
+    #[must_use]
     pub fn get_remote(&self) -> &SocketAddr {
         &self.remote
     }

@@ -50,10 +50,10 @@ pub struct AeadCrypto {
 }
 
 impl AeadCrypto {
+    #[must_use]
     pub fn new(key: &[u8], algorithm: &'static aead::Algorithm) -> Self {
         let salt = b"ap-kcp-aead-salt";
-        let mut key_bytes = Vec::with_capacity(algorithm.key_len());
-        key_bytes.resize(algorithm.key_len(), 0);
+        let mut key_bytes = vec![0; algorithm.key_len()];
         pbkdf2::derive(
             pbkdf2::PBKDF2_HMAC_SHA256,
             NonZeroU32::new(32).unwrap(),
@@ -73,7 +73,7 @@ impl AeadCrypto {
 
 impl<C: Crypto> Crypto for Arc<C> {
     fn encrypt(&self, buf: &mut Vec<u8>) {
-        C::encrypt(self, buf)
+        C::encrypt(self, buf);
     }
 
     fn decrypt(&self, buf: &mut Vec<u8>) -> bool {

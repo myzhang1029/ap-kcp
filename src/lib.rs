@@ -23,11 +23,10 @@ pub mod test {
     use crate::core::KcpConfig;
 
     use super::*;
+    use async_channel::{bounded, Receiver, Sender};
     use log::LevelFilter;
     use rand::prelude::*;
-    use smol::channel::{bounded, Receiver, Sender};
-    use smol::prelude::*;
-    use smol::{net::UdpSocket, Timer};
+    use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::UdpSocket, task::JoinSet, time::sleep};
 
     pub async fn get_udp_pair() -> (UdpSocket, UdpSocket) {
         let io1 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -40,7 +39,7 @@ pub mod test {
     pub fn init() {
         std::env::set_var("SMOL_THREADS", "8");
         let _ = env_logger::builder()
-            .filter_module("ap_kcp", LevelFilter::Trace)
+            .filter_module("ap_kcp", LevelFilter::Debug)
             .try_init();
     }
 
@@ -48,7 +47,7 @@ pub mod test {
         let kcp1 = KcpHandle::new(io1, KcpConfig::default()).unwrap();
         let kcp2 = KcpHandle::new(io2, KcpConfig::default()).unwrap();
 
-        smol::spawn(async move {
+        tokio::spawn(async move {
             let mut stream1 = kcp1.connect().await.unwrap();
             for i in 0..255 {
                 let payload = [i as u8; 0x1000];
@@ -63,9 +62,8 @@ pub mod test {
                 assert_eq!(i as u8, buf[99]);
             }
             log::debug!("stream1 read");
-            stream1.close().await.unwrap();
-        })
-        .detach();
+            stream1.shutdown().await.unwrap();
+        });
 
         let mut stream2 = kcp2.accept().await.unwrap();
         let mut buf = Vec::new();
@@ -79,7 +77,7 @@ pub mod test {
             let payload = [i as u8; 0x1000];
             stream2.write_all(&payload).await.unwrap();
         }
-        stream2.close().await.unwrap();
+        stream2.shutdown().await.unwrap();
     }
 
     fn random_data() -> Arc<Vec<u8>> {
@@ -93,47 +91,50 @@ pub mod test {
         let data = random_data();
 
         let data1 = data.clone();
-        let t1 = smol::spawn(async move {
+        let t1 = tokio::spawn(async move {
             let kcp1 = KcpHandle::new(io1, KcpConfig::default()).unwrap();
-            let mut tasks = Vec::new();
+            let mut tasks = JoinSet::new();
             for _ in 0..10 {
                 let mut stream1 = kcp1.connect().await.unwrap();
                 let data = data1.clone();
-                tasks.push(smol::spawn(async move {
+                tasks.spawn(async move {
                     let mut buf = Vec::new();
                     buf.resize(data.len(), 0u8);
                     stream1.write_all(&data).await.unwrap();
                     stream1.read_exact(&mut buf).await.unwrap();
                     assert_eq!(&buf[..], &data[..]);
-                    stream1.close().await.unwrap();
-                }));
+                    stream1.shutdown().await.unwrap();
+                });
             }
-            for t in &mut tasks {
-                t.await;
+            while let Some(t) = tasks.join_next().await {
+                t.unwrap();
             }
         });
 
         let data2 = data.clone();
-        let t2 = smol::spawn(async move {
+        let t2 = tokio::spawn(async move {
             let kcp2 = KcpHandle::new(io2, KcpConfig::default()).unwrap();
-            let mut tasks = Vec::new();
+            let mut tasks = JoinSet::new();
             for _ in 0..10 {
                 let mut stream2 = kcp2.accept().await.unwrap();
                 let data = data2.clone();
-                tasks.push(smol::spawn(async move {
+                tasks.spawn(async move {
                     let mut buf = Vec::new();
                     buf.resize(data.len(), 0u8);
                     stream2.read_exact(&mut buf).await.unwrap();
                     assert_eq!(&buf[..], &data[..]);
                     stream2.write_all(&data).await.unwrap();
-                    stream2.close().await.unwrap();
-                }));
+                    stream2.shutdown().await.unwrap();
+                });
             }
-            for t in &mut tasks {
-                t.await;
+            while let Some(t) = tasks.join_next().await {
+                t.unwrap();
             }
         });
-        t1.race(t2).await;
+        tokio::select! {
+            r = t1 => r.unwrap(),
+            r = t2 => r.unwrap(),
+        }
     }
 
     pub struct NetworkIoSimulator {
@@ -171,15 +172,14 @@ pub mod test {
             let loss = self.packet_loss;
             let mut packet = Vec::new();
             packet.extend_from_slice(buf);
-            smol::spawn(async move {
-                Timer::after(Duration::from_millis(delay)).await;
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(delay)).await;
                 if !rand::thread_rng().gen_bool(loss) {
                     let _ = tx.send(packet).await;
                 } else {
                     log::debug!("packet lost XD");
                 }
-            })
-            .detach();
+            });
             Ok(())
         }
 
@@ -193,199 +193,173 @@ pub mod test {
         }
     }
 
-    #[test]
-    fn udp() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn udp() {
         init();
-        smol::block_on(async move {
-            let (io1, io2) = get_udp_pair().await;
-            send_recv(io1, io2).await;
-        });
+        let (io1, io2) = get_udp_pair().await;
+        send_recv(io1, io2).await;
     }
 
-    #[test]
-    fn normal() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn normal() {
         init();
-        smol::block_on(async move {
-            let (io1, io2) = NetworkIoSimulator::new(0.005, 20);
-            send_recv(io1, io2).await;
-            let (io1, io2) = NetworkIoSimulator::new(0.005, 20);
-            concurrent_send_recv(io1, io2).await;
-        });
+        let (io1, io2) = NetworkIoSimulator::new(0.005, 20);
+        send_recv(io1, io2).await;
+        let (io1, io2) = NetworkIoSimulator::new(0.005, 20);
+        concurrent_send_recv(io1, io2).await;
     }
 
-    #[test]
-    fn laggy() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn laggy() {
         init();
-        smol::block_on(async move {
-            let (io1, io2) = NetworkIoSimulator::new(0.005, 300);
-            send_recv(io1, io2).await;
-            let (io1, io2) = NetworkIoSimulator::new(0.005, 300);
-            concurrent_send_recv(io1, io2).await;
-        });
+        let (io1, io2) = NetworkIoSimulator::new(0.005, 300);
+        send_recv(io1, io2).await;
+        let (io1, io2) = NetworkIoSimulator::new(0.005, 300);
+        concurrent_send_recv(io1, io2).await;
     }
 
-    #[test]
-    fn packet_lost() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn packet_lost() {
         init();
-        smol::block_on(async move {
-            let (io1, io2) = NetworkIoSimulator::new(0.3, 100);
-            send_recv(io1, io2).await;
-            let (io1, io2) = NetworkIoSimulator::new(0.3, 100);
-            concurrent_send_recv(io1, io2).await;
-        });
+        let (io1, io2) = NetworkIoSimulator::new(0.3, 100);
+        send_recv(io1, io2).await;
+        let (io1, io2) = NetworkIoSimulator::new(0.3, 100);
+        concurrent_send_recv(io1, io2).await;
     }
 
-    #[test]
-    fn horrible() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn horrible() {
         init();
-        smol::block_on(async move {
-            let (io1, io2) = NetworkIoSimulator::new(0.3, 500);
-            send_recv(io1, io2).await;
-            let (io1, io2) = NetworkIoSimulator::new(0.3, 500);
-            concurrent_send_recv(io1, io2).await;
-        });
+        let (io1, io2) = NetworkIoSimulator::new(0.3, 500);
+        send_recv(io1, io2).await;
+        let (io1, io2) = NetworkIoSimulator::new(0.3, 500);
+        concurrent_send_recv(io1, io2).await;
     }
 
-    #[test]
-    fn drop_handle() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_handle() {
         init();
-        smol::block_on(async move {
-            let (io1, _io2) = NetworkIoSimulator::new(0.0, 10);
-            let kcp1 = KcpHandle::new(io1, KcpConfig::default()).unwrap();
-            let mut stream1 = kcp1.connect().await.unwrap();
-            drop(kcp1);
-            let mut buf = Vec::new();
-            buf.resize(100, 0u8);
-            assert!(stream1.read_exact(&mut buf).await.is_err());
-        });
+        let (io1, _io2) = NetworkIoSimulator::new(0.0, 10);
+        let kcp1 = KcpHandle::new(io1, KcpConfig::default()).unwrap();
+        let mut stream1 = kcp1.connect().await.unwrap();
+        drop(kcp1);
+        let mut buf = Vec::new();
+        buf.resize(100, 0u8);
+        assert!(stream1.read_exact(&mut buf).await.is_err());
     }
 
-    #[test]
-    fn drop_stream() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_stream() {
         init();
-        smol::block_on(async move {
-            let (io1, _io2) = NetworkIoSimulator::new(0.0, 10);
-            let kcp1 = KcpHandle::new(io1, KcpConfig::default()).unwrap();
-            let stream1 = kcp1.connect().await.unwrap();
-            assert_eq!(kcp1.get_stream_count().await, 1);
-            drop(stream1);
-            Timer::after(Duration::from_millis(
-                1000 + KcpConfig::default().timeout as u64,
-            ))
-            .await;
-            assert_eq!(kcp1.get_stream_count().await, 0);
-        });
+        let (io1, _io2) = NetworkIoSimulator::new(0.0, 10);
+        let kcp1 = KcpHandle::new(io1, KcpConfig::default()).unwrap();
+        let stream1 = kcp1.connect().await.unwrap();
+        assert_eq!(kcp1.get_stream_count().await, 1);
+        drop(stream1);
+        sleep(Duration::from_millis(
+            1000 + KcpConfig::default().timeout as u64,
+        ))
+        .await;
+        assert_eq!(kcp1.get_stream_count().await, 0);
     }
 
-    #[test]
-    fn timeout() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout() {
         init();
-        smol::block_on(async move {
-            let (io1, io2) = NetworkIoSimulator::new(1.0, 500);
+        let (io1, io2) = NetworkIoSimulator::new(1.0, 500);
+        let config = KcpConfig::default();
+        let kcp1 = KcpHandle::new(io1, config.clone()).unwrap();
+        let _kcp2 = KcpHandle::new(io2, config.clone()).unwrap();
+        let mut stream1 = kcp1.connect().await.unwrap();
+        let mut buf = Vec::new();
+        buf.resize(100, 0u8);
+        assert!(stream1.read_exact(&mut buf).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keep_alive() {
+        init();
+        let (io1, io2) = NetworkIoSimulator::new(0.0, 10);
+        let mut config = KcpConfig::default();
+        config.timeout = 1000;
+        config.keep_alive_interval = 300;
+        let kcp1 = KcpHandle::new(io1, config.clone()).unwrap();
+        let kcp2 = KcpHandle::new(io2, config.clone()).unwrap();
+        let mut stream1 = kcp1.connect().await.unwrap();
+        let mut stream2 = kcp2.accept().await.unwrap();
+        sleep(Duration::from_secs(5)).await;
+        let mut buf = Vec::new();
+        buf.resize(100, 0u8);
+        stream1.write_all(b"hello1").await.unwrap();
+        let len = stream2.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..len], b"hello1");
+        sleep(Duration::from_secs(5)).await;
+
+        stream1.write_all(b"hello2").await.unwrap();
+        let len = stream2.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..len], b"hello2");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rexmit() {
+        init();
+        let (io1, io2) = NetworkIoSimulator::new(1.0, 10);
+        let mut config = KcpConfig::default();
+        config.max_rexmit_time = 8;
+        let kcp1 = KcpHandle::new(io1, config.clone()).unwrap();
+        let _kcp2 = KcpHandle::new(io2, config.clone()).unwrap();
+        let mut stream1 = kcp1.connect().await.unwrap();
+        stream1.write(b"test").await.unwrap();
+        let mut buf = Vec::new();
+        assert!(stream1.read(&mut buf).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn close() {
+        init();
+        let (io1, io2) = NetworkIoSimulator::new(0.0, 100);
+
+        let t = tokio::spawn(async move {
             let config = KcpConfig::default();
-            let kcp1 = KcpHandle::new(io1, config.clone()).unwrap();
-            let _kcp2 = KcpHandle::new(io2, config.clone()).unwrap();
-            let mut stream1 = kcp1.connect().await.unwrap();
-            let mut buf = Vec::new();
-            buf.resize(100, 0u8);
-            assert!(stream1.read_exact(&mut buf).await.is_err());
-        });
-    }
-
-    #[test]
-    fn keep_alive() {
-        init();
-        smol::block_on(async move {
-            let (io1, io2) = NetworkIoSimulator::new(0.0, 10);
-            let mut config = KcpConfig::default();
-            config.timeout = 1000;
-            config.keep_alive_interval = 300;
-            let kcp1 = KcpHandle::new(io1, config.clone()).unwrap();
-            let kcp2 = KcpHandle::new(io2, config.clone()).unwrap();
-            let mut stream1 = kcp1.connect().await.unwrap();
-            let mut stream2 = kcp2.accept().await.unwrap();
-            Timer::after(Duration::from_secs(5)).await;
-            let mut buf = Vec::new();
-            buf.resize(100, 0u8);
-            stream1.write_all(b"hello1").await.unwrap();
-            let len = stream2.read(&mut buf).await.unwrap();
-            assert_eq!(&buf[..len], b"hello1");
-            Timer::after(Duration::from_secs(5)).await;
-
-            stream1.write_all(b"hello2").await.unwrap();
-            let len = stream2.read(&mut buf).await.unwrap();
-            assert_eq!(&buf[..len], b"hello2");
-        });
-    }
-
-    #[test]
-    fn rexmit() {
-        init();
-        smol::block_on(async move {
-            let (io1, io2) = NetworkIoSimulator::new(1.0, 10);
-            let mut config = KcpConfig::default();
-            config.max_rexmit_time = 8;
-            let kcp1 = KcpHandle::new(io1, config.clone()).unwrap();
-            let _kcp2 = KcpHandle::new(io2, config.clone()).unwrap();
+            let kcp1 = KcpHandle::new(io1, config).unwrap();
             let mut stream1 = kcp1.connect().await.unwrap();
             stream1.write(b"test").await.unwrap();
-            let mut buf = Vec::new();
-            assert!(stream1.read(&mut buf).await.is_err());
+            stream1.shutdown().await.unwrap();
         });
+        let config = KcpConfig::default();
+        let kcp2 = KcpHandle::new(io2, config).unwrap();
+        let mut buf = Vec::new();
+        let mut stream2 = kcp2.accept().await.unwrap();
+        stream2.read(&mut buf).await.unwrap();
+        stream2.shutdown().await.unwrap();
+        t.await.unwrap();
     }
 
-    #[test]
-    fn close() {
-        init();
-        smol::block_on(async move {
-            let (io1, io2) = NetworkIoSimulator::new(0.0, 100);
-
-            let t = smol::spawn(async move {
-                let config = KcpConfig::default();
-                let kcp1 = KcpHandle::new(io1, config).unwrap();
-                let mut stream1 = kcp1.connect().await.unwrap();
-                stream1.write(b"test").await.unwrap();
-                stream1.close().await.unwrap();
-            });
-            let config = KcpConfig::default();
-            let kcp2 = KcpHandle::new(io2, config).unwrap();
-            let mut buf = Vec::new();
-            let mut stream2 = kcp2.accept().await.unwrap();
-            stream2.read(&mut buf).await.unwrap();
-            stream2.close().await.unwrap();
-            t.await;
-        });
-    }
-
-    #[test]
-    fn session() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session() {
         init();
         let data = random_data();
-        smol::block_on(async move {
-            udp_session(data).await;
-        });
+        udp_session(data).await;
     }
 
     pub async fn udp_session(data: Arc<Vec<u8>>) {
-        smol::block_on(async move {
-            let (io1, io2) = get_udp_pair().await;
-            let handle1 = KcpHandle::new(io1, KcpConfig::default()).unwrap();
-            let data1 = data.clone();
-            let t = smol::spawn(async move {
-                let io2 = udp::UdpListener::new(io2);
-                let session = io2.accept().await;
-                let handle2 = KcpHandle::new(session, KcpConfig::default()).unwrap();
-                let mut stream2 = handle2.accept().await.unwrap();
-                let mut buf = Vec::new();
-                buf.resize(data1.len(), 0);
-                stream2.read_exact(&mut buf).await.unwrap();
-                assert_eq!(&buf[..], &data1[..]);
-                stream2.close().await.unwrap();
-            });
-            let mut stream1 = handle1.connect().await.unwrap();
-            stream1.write_all(&data).await.unwrap();
-            stream1.close().await.unwrap();
-            t.await;
+        let (io1, io2) = get_udp_pair().await;
+        let handle1 = KcpHandle::new(io1, KcpConfig::default()).unwrap();
+        let data1 = data.clone();
+        let t = tokio::spawn(async move {
+            let io2 = udp::UdpListener::new(io2);
+            let session = io2.accept().await;
+            let handle2 = KcpHandle::new(session, KcpConfig::default()).unwrap();
+            let mut stream2 = handle2.accept().await.unwrap();
+            let mut buf = Vec::new();
+            buf.resize(data1.len(), 0);
+            stream2.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf[..], &data1[..]);
+            stream2.shutdown().await.unwrap();
         });
+        let mut stream1 = handle1.connect().await.unwrap();
+        stream1.write_all(&data).await.unwrap();
+        stream1.shutdown().await.unwrap();
+        t.await.unwrap();
     }
 }

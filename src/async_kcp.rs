@@ -7,12 +7,14 @@ use std::{
     time::Duration,
 };
 
+use async_channel::{bounded, Receiver, Sender};
 use bytes::{Buf, Bytes};
-use futures::{ready, AsyncRead, AsyncWrite};
-use smol::{
-    channel::{bounded, Receiver, Sender},
-    future::FutureExt,
-    Task, Timer,
+use futures::ready;
+use std::future::Future;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    runtime::Handle,
+    task::block_in_place,
 };
 
 use fast_async_mutex::mutex::{Mutex, MutexOwnedGuard, MutexOwnedGuardFuture};
@@ -34,10 +36,12 @@ pub struct KcpStream {
 
 impl Drop for KcpStream {
     fn drop(&mut self) {
-        smol::block_on(async {
-            if let Err(e) = self.core.lock().await.try_close() {
-                log::trace!("try_close failed {}", e);
-            }
+        block_in_place(|| {
+            Handle::current().block_on(async move {
+                if let Err(e) = self.core.lock().await.try_close() {
+                    log::trace!("try_close failed {}", e);
+                }
+            });
         });
         log::trace!("kcp stream dropped");
     }
@@ -52,19 +56,17 @@ impl KcpStream {
     ) -> Poll<MutexOwnedGuard<KcpCore>> {
         match future_storage {
             Some(fut) => {
-                let guard = ready!(fut.poll(cx));
+                let guard = ready!(Pin::new(fut).poll(cx));
                 *future_storage = None;
-                return Poll::Ready(guard);
+                Poll::Ready(guard)
             }
             None => {
                 let mut fut = core.lock_owned();
-                match fut.poll(cx) {
-                    Poll::Ready(guard) => {
-                        return Poll::Ready(guard);
-                    }
+                match Pin::new(&mut fut).poll(cx) {
+                    Poll::Ready(guard) => Poll::Ready(guard),
                     Poll::Pending => {
                         *future_storage = Some(fut);
-                        return Poll::Pending;
+                        Poll::Pending
                     }
                 }
             }
@@ -76,8 +78,8 @@ impl AsyncRead for KcpStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
+        buf: &mut ReadBuf,
+    ) -> Poll<std::io::Result<()>> {
         loop {
             if self.read_buffer.is_some() {
                 if self.read_buffer.as_mut().unwrap().is_empty() {
@@ -85,16 +87,16 @@ impl AsyncRead for KcpStream {
                 } else {
                     let queue = self.read_buffer.as_mut().unwrap();
                     let payload = queue.front_mut().unwrap();
-                    if payload.remaining() > buf.len() {
-                        let buf_len = buf.len();
-                        buf.copy_from_slice(&payload[..buf_len]);
+                    if payload.remaining() > buf.remaining() {
+                        let buf_len = buf.remaining();
+                        buf.put_slice(&payload[..buf_len]);
                         payload.advance(buf_len);
-                        return Poll::Ready(Ok(buf_len));
+                        return Poll::Ready(Ok(()));
                     }
                     let len = payload.remaining();
-                    payload.copy_to_slice(&mut buf[..len]);
+                    buf.put_slice(&payload[..len]);
                     queue.pop_front();
-                    return Poll::Ready(Ok(len));
+                    return Poll::Ready(Ok(()));
                 }
             }
             let mut core = ready!(Self::lock_core(
@@ -114,7 +116,7 @@ impl AsyncWrite for KcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             // Never send an empty packet
             return Poll::Ready(Ok(0));
         }
@@ -137,7 +139,7 @@ impl AsyncWrite for KcpStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let mut core = ready!(Self::lock_core(
             cx,
             self.core.clone(),
@@ -150,7 +152,6 @@ impl AsyncWrite for KcpStream {
 
 struct KcpSession {
     core: Arc<Mutex<KcpCore>>,
-    _update_task: Task<KcpResult<()>>,
 }
 
 pub struct KcpHandle<T> {
@@ -159,19 +160,19 @@ pub struct KcpHandle<T> {
     accept_rx: Receiver<KcpStream>,
     dead_tx: Sender<u16>,
     io: Arc<T>,
-    _feed_packet_task: Task<KcpResult<()>>,
-    _clean_task: Task<KcpResult<()>>,
 }
 
 impl<T> Drop for KcpHandle<T> {
     fn drop(&mut self) {
-        smol::block_on(async move {
-            log::debug!("dropping kcp handle");
-            self.accept_rx.close();
-            let sessions = self.sessions.lock().await;
-            for (_, session) in sessions.iter() {
-                let _ = session.core.lock().await.force_close();
-            }
+        log::debug!("dropping kcp handle");
+        self.accept_rx.close();
+        block_in_place(|| {
+            Handle::current().block_on(async move {
+                let sessions = self.sessions.lock().await;
+                for session in sessions.values() {
+                    session.core.lock().await.force_close();
+                }
+            });
         });
         log::debug!("dropped kcp handle");
     }
@@ -215,7 +216,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
             flush_lock_future: None,
             close_lock_future: None,
         };
-        let _update_task = smol::spawn(Self::update(
+        tokio::spawn(Self::update(
             core.clone(),
             self.io.clone(),
             rx,
@@ -224,20 +225,16 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
         self.sessions
             .lock()
             .await
-            .insert(stream_id, KcpSession { core, _update_task });
+            .insert(stream_id, KcpSession { core });
         Ok(stream)
     }
 
     pub async fn accept(&self) -> KcpResult<KcpStream> {
         match self.accept_rx.recv().await {
-            Ok(stream) => {
-                return Ok(stream);
-            }
-            Err(_) => {
-                return Err(KcpError::Shutdown(
-                    "accpeting but kcp handle is closed".to_string(),
-                ));
-            }
+            Ok(stream) => Ok(stream),
+            Err(_) => Err(KcpError::Shutdown(
+                "accpeting but kcp handle is closed".to_string(),
+            )),
         }
     }
 
@@ -271,25 +268,24 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
                         log::warn!("kcp core is shutting down: {}", s);
                         let _ = dead_tx.send(stream_id).await;
                         return Err(e);
-                    } else {
-                        // Sleep and continue
-                        log::error!("flush error: {}, retrying...", e);
-                        let r = rand::random::<u32>() % core.config.max_interval;
-                        core.config.max_interval + r
                     }
+                    // Sleep and continue
+                    log::error!("flush error: {}, retrying...", e);
+                    let r = rand::random::<u32>() % core.config.max_interval;
+                    core.config.max_interval + r
                 } else {
                     core.get_interval()
                 }
             };
-            let notify = async {
-                let _ = flush_notify_rx.recv().await;
+            if tokio::time::timeout(
+                Duration::from_millis(interval as u64),
+                flush_notify_rx.recv(),
+            )
+            .await
+            .is_ok()
+            {
                 log::trace!("updater wake up now!");
-            };
-            let tick = async move {
-                Timer::after(Duration::from_millis(interval as u64)).await;
-            };
-
-            notify.race(tick).await;
+            }
         }
     }
 
@@ -322,7 +318,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
             let mut new_stream = false;
 
             while cursor.has_remaining() {
-                match KcpSegment::decode(&cursor) {
+                match KcpSegment::decode(cursor) {
                     Ok(segment) => {
                         if segment.stream_id != stream_id {
                             invalid_packet = true;
@@ -357,31 +353,23 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
 
                 if let Some(session) = sessions.get_mut(&stream_id) {
                     session.core.clone()
+                } else if new_stream {
+                    let (tx, rx) = bounded(1);
+                    let core = Arc::new(Mutex::new(
+                        KcpCore::new(stream_id, config.clone(), tx).unwrap(),
+                    ));
+                    {
+                        let core = core.clone();
+                        let io = io.clone();
+                        tokio::spawn(Self::update(core, io, rx, dead_tx.clone()))
+                    };
+                    sessions.insert(stream_id, KcpSession { core: core.clone() });
+                    is_new_stream = true;
+                    log::trace!("new kcp stream");
+                    core
                 } else {
-                    if new_stream {
-                        let (tx, rx) = bounded(1);
-                        let core = Arc::new(Mutex::new(
-                            KcpCore::new(stream_id, config.clone(), tx).unwrap(),
-                        ));
-                        let update_task = {
-                            let core = core.clone();
-                            let io = io.clone();
-                            smol::spawn(Self::update(core, io, rx, dead_tx.clone()))
-                        };
-                        sessions.insert(
-                            stream_id,
-                            KcpSession {
-                                core: core.clone(),
-                                _update_task: update_task,
-                            },
-                        );
-                        is_new_stream = true;
-                        log::trace!("new kcp stream");
-                        core
-                    } else {
-                        log::error!("unknown stream_id {}", stream_id);
-                        continue;
-                    }
+                    log::error!("unknown stream_id {}", stream_id);
+                    continue;
                 }
             };
 
@@ -400,7 +388,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
                 };
             }
 
-            core.lock().await.input(segments).unwrap();
+            core.lock().await.input(&segments);
         }
     }
 
@@ -415,7 +403,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
         let (dead_tx, dead_rx) = bounded(0x10);
 
         // The only task reading the socket
-        let _feed_packet_task = smol::spawn(Self::feed_packet(
+        tokio::spawn(Self::feed_packet(
             sessions.clone(),
             config.clone(),
             io.clone(),
@@ -423,16 +411,14 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
             dead_tx.clone(),
         ));
 
-        let _clean_task = smol::spawn(Self::clean(sessions.clone(), dead_rx.clone()));
+        tokio::spawn(Self::clean(sessions.clone(), dead_rx));
 
         Ok(Self {
             sessions,
             config,
             accept_rx,
-            io,
-            _feed_packet_task,
-            _clean_task,
             dead_tx,
+            io,
         })
     }
 }

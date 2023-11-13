@@ -1,14 +1,14 @@
 use std::{
-    cmp,
+    cmp::{self, Ordering},
     collections::{HashMap, VecDeque},
     sync::Arc,
     task::{Context, Poll, Waker},
     time::SystemTime,
 };
 
+use async_channel::Sender;
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use smol::channel::Sender;
 
 use crate::{
     error::{KcpError, KcpResult},
@@ -26,7 +26,7 @@ pub trait KcpIo {
     async fn recv_packet(&self) -> std::io::Result<Vec<u8>>;
 }
 
-#[inline(always)]
+#[inline]
 fn now_millis() -> u32 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -34,12 +34,12 @@ fn now_millis() -> u32 {
         .as_millis() as u32
 }
 
-#[inline(always)]
+#[inline]
 fn i32diff(a: u32, b: u32) -> i32 {
     a as i32 - b as i32
 }
 
-#[inline(always)]
+#[inline]
 fn bound<T: Ord>(lower: T, v: T, upper: T) -> T {
     cmp::min(cmp::max(lower, v), upper)
 }
@@ -113,7 +113,7 @@ impl Default for KcpConfig {
             recv_window_size: 0x1000,
             timeout: 30000,
             keep_alive_interval: 1500,
-            name: "".to_string(),
+            name: String::new(),
         }
     }
 }
@@ -132,14 +132,12 @@ impl KcpConfig {
         }
         if self.send_window_size < MIN_WINDOW_SIZE || self.send_window_size > MAX_WINDOW_SIZE {
             return Err(KcpError::InvalidConfig(format!(
-                "send_window_size should be in range ({}, {})",
-                MIN_WINDOW_SIZE, MAX_WINDOW_SIZE
+                "send_window_size should be in range ({MIN_WINDOW_SIZE}, {MAX_WINDOW_SIZE})"
             )));
         }
         if self.recv_window_size < MIN_WINDOW_SIZE || self.recv_window_size > MAX_WINDOW_SIZE {
             return Err(KcpError::InvalidConfig(format!(
-                "recv_window_size should be in range ({}, {})",
-                MIN_WINDOW_SIZE, MAX_WINDOW_SIZE
+                "recv_window_size should be in range ({MIN_WINDOW_SIZE}, {MAX_WINDOW_SIZE})",
             )));
         }
         if self.mss > self.mtu - HEADER_SIZE {
@@ -172,6 +170,7 @@ mod test {
     recv_window_size = 0x800
     timeout = 5000
     keep_alive_interval = 1500
+    name = ""
     "#;
         let config = toml::from_str::<KcpConfig>(s).unwrap();
         assert_eq!(config.max_interval, 10);
@@ -263,7 +262,7 @@ impl KcpCore {
     }
 
     fn remove_send_window_until(&mut self, sequence: u32) {
-        while self.send_window.len() != 0 {
+        while !self.send_window.is_empty() {
             if i32diff(sequence, self.send_window.front().unwrap().segment.sequence) > 0 {
                 self.send_window.pop_front();
             } else {
@@ -308,11 +307,13 @@ impl KcpCore {
 
         for i in 0..self.send_window.len() {
             let segment_seq = self.send_window[i].segment.sequence;
-            if sequence == segment_seq {
-                self.send_window.remove(i);
-                break;
-            } else if sequence < segment_seq {
-                break;
+            match sequence.cmp(&segment_seq) {
+                Ordering::Less => break,
+                Ordering::Equal => {
+                    self.send_window.remove(i);
+                    break;
+                }
+                Ordering::Greater => continue,
             }
         }
     }
@@ -359,7 +360,7 @@ impl KcpCore {
             // Some packets were sent and acked successfully
             // It's time to update cwnd
             match self.config.congestion {
-                Congestion::None => {}
+                Congestion::None | Congestion::LossTolerance => {}
                 Congestion::KcpReno => {
                     for _ in 0..ack_num {
                         if self.congestion_window_size < self.remote_window_size {
@@ -389,7 +390,6 @@ impl KcpCore {
                         }
                     }
                 }
-                Congestion::LossTolerance => {}
             }
             log::trace!(
                 "ack, cwnd = {}, incr = {}",
@@ -412,14 +412,14 @@ impl KcpCore {
                 let _ = self.flush_notify_tx.try_send(());
             }
             if i32diff(segment.sequence, self.recv_next) >= 0 {
-                if !self.recv_window.contains_key(&segment.sequence) {
-                    self.recv_window.insert(segment.sequence, segment.clone());
-                }
+                self.recv_window
+                    .entry(segment.sequence)
+                    .or_insert_with(|| segment.clone());
                 while self.recv_window.contains_key(&self.recv_next) {
                     let segment = self.recv_window.remove(&self.recv_next).unwrap();
                     // Empty payload, closing
                     log::trace!("empty payload, closing");
-                    if segment.data.len() == 0 {
+                    if segment.data.is_empty() {
                         // No more data from the peer
                         // This is the last segment moved into send_queue
                         self.close_state.set(CloseFlags::RX_CLOSED, true);
@@ -439,11 +439,11 @@ impl KcpCore {
         log::trace!("input push");
     }
 
-    pub fn input(&mut self, segments: Vec<KcpSegment>) -> KcpResult<()> {
+    pub fn input(&mut self, segments: &[KcpSegment]) {
         self.now = now_millis();
         self.last_active = self.now;
 
-        for segment in &segments {
+        for segment in segments {
             assert_eq!(segment.stream_id, self.stream_id);
             log::trace!("input segment: {:?}", segment);
             self.remote_window_size = segment.recv_window_size;
@@ -474,7 +474,6 @@ impl KcpCore {
         }
 
         self.try_wake_stream();
-        Ok(())
     }
 
     #[inline]
@@ -559,14 +558,13 @@ impl KcpCore {
         if self.recv_ready() {
             let queue = self.recv_queue.clone();
             self.recv_queue.clear();
-            return Poll::Ready(Ok(queue));
+            Poll::Ready(Ok(queue))
+        } else if self.close_state.contains(CloseFlags::RX_CLOSED) {
+            Poll::Ready(Err(KcpError::Shutdown(format!(
+                "poll_recv on a closing kcp core: {}",
+                self.close_state.bits,
+            ))))
         } else {
-            if self.close_state.contains(CloseFlags::RX_CLOSED) {
-                return Poll::Ready(Err(KcpError::Shutdown(format!(
-                    "poll_recv on a closing kcp core: {}",
-                    self.close_state.bits,
-                ))));
-            }
             log::trace!("poll_recv pending");
             self.recv_waker = Some(cx.waker().clone());
             Poll::Pending
@@ -905,31 +903,40 @@ impl KcpCore {
     ) -> KcpResult<Self> {
         config.check()?;
         let now = now_millis();
+        let send_queue = VecDeque::with_capacity(usize::from(config.send_window_size));
+        let send_window = VecDeque::with_capacity(usize::from(config.send_window_size));
+        let recv_queue = VecDeque::with_capacity(usize::from(config.recv_window_size));
+        let recv_window = HashMap::with_capacity(usize::from(config.recv_window_size));
+        let ack_list = VecDeque::with_capacity(usize::from(config.recv_window_size));
+        let remote_window_size = config.recv_window_size;
+        let congestion_window_size = config.send_window_size;
+        let congestion_window_bytes = config.mss;
+        let buffer = Vec::with_capacity(config.mtu * 2);
         Ok(KcpCore {
             stream_id,
-            config: config.clone(),
-            send_queue: VecDeque::with_capacity(config.send_window_size as usize),
-            send_window: VecDeque::with_capacity(config.send_window_size as usize),
-            recv_queue: VecDeque::with_capacity(config.recv_window_size as usize),
-            recv_window: HashMap::with_capacity(config.recv_window_size as usize),
-            ack_list: VecDeque::with_capacity(config.recv_window_size as usize),
+            config,
+            send_queue,
+            send_window,
+            recv_queue,
+            recv_window,
+            ack_list,
             send_unack: 0,
             send_next: 0,
             recv_next: 0,
 
-            remote_window_size: config.recv_window_size,
-            congestion_window_size: config.send_window_size,
-            congestion_window_bytes: config.mss,
+            remote_window_size,
+            congestion_window_size,
+            congestion_window_bytes,
             slow_start_thresh: SSTHRESH_MIN,
 
             rto: RTO_INIT,
             srtt: 0,
             rttval: 0,
 
-            now: now,
+            now,
             ping_ts: 0,
 
-            buffer: Vec::with_capacity(config.mtu * 2),
+            buffer,
 
             send_waker: None,
             recv_waker: None,
