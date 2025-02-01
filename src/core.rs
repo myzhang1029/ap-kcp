@@ -72,7 +72,7 @@ bitflags! {
         const TX_CLOSING = 0b00000001;
         const TX_CLOSED = 0b00000011;
         const RX_CLOSED = 0b00000100;
-        const CLOSED = Self::TX_CLOSED.bits | Self::RX_CLOSED.bits;
+        const CLOSED = Self::TX_CLOSED.bits() | Self::RX_CLOSED.bits();
     }
 }
 
@@ -516,7 +516,7 @@ impl KcpCore {
         if self.close_state.contains(CloseFlags::TX_CLOSING) {
             return Poll::Ready(Err(KcpError::Shutdown(format!(
                 "poll_send on a closing kcp core: {}",
-                self.close_state.bits,
+                self.close_state.bits(),
             ))));
         }
 
@@ -562,7 +562,7 @@ impl KcpCore {
         } else if self.close_state.contains(CloseFlags::RX_CLOSED) {
             Poll::Ready(Err(KcpError::Shutdown(format!(
                 "poll_recv on a closing kcp core: {}",
-                self.close_state.bits,
+                self.close_state.bits(),
             ))))
         } else {
             log::trace!("poll_recv pending");
@@ -575,7 +575,7 @@ impl KcpCore {
         if self.close_state.contains(CloseFlags::TX_CLOSING) {
             return Poll::Ready(Err(KcpError::Shutdown(format!(
                 "poll_recv on a closing kcp core: {}",
-                self.close_state.bits,
+                self.close_state.bits(),
             ))));
         }
 

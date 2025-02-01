@@ -7,22 +7,22 @@ license = "MIT"
 description = "AP-KCP Protocol Library"
 
 [dependencies]
-async-channel = "1"
+async-channel = "2"
 bytes = "1"
 log = "0.4"
 futures = "0.3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 async-trait = "0.1"
-rand = "0.8"
-env_logger = "0.10"
-bitflags = "1"
+rand = "0.9"
+env_logger = "0.11"
+bitflags = "2"
 fast-async-mutex = "0.6"
 
 num_cpus = { version = "1", optional = true }
 serde = { version = "1", optional = true }
 serde_derive = { version = "1", optional = true }
-toml = { version = "0.7", optional = true }
-ring = { version = "0.16", optional = true }
+toml = { version = "0.8", optional = true }
+ring = { version = "0.17", optional = true }
 clap = { version = "4", optional = true }
 
 [profile.release]
@@ -30,8 +30,8 @@ lto = "fat"
 codegen-units = 4
 
 [dev-dependencies]
-criterion = "0.4"
-pprof = { version = "0.11", features = ["flamegraph"] }
+criterion = "0.5"
+pprof = { version = "0.14", features = ["flamegraph"] }
 
 [features]
 serde_support = ["serde", "serde_derive"]

@@ -23,7 +23,7 @@ async fn get_udp_pair() -> (UdpSocket, UdpSocket) {
 fn random_data() -> Arc<Vec<u8>> {
     let mut buf = Vec::new();
     buf.resize(DATA_SIZE, 0);
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     Arc::new(buf)
 }
 
