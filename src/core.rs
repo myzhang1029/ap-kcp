@@ -93,6 +93,7 @@ pub struct KcpConfig {
     pub recv_window_size: u16,
     pub timeout: u32,
     pub keep_alive_interval: u32,
+    #[allow(dead_code)]
     pub name: String,
 }
 
