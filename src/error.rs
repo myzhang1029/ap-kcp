@@ -18,7 +18,7 @@ pub enum KcpError {
 impl StdError for KcpError {}
 
 impl fmt::Display for KcpError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "{self:?}")
     }
 }

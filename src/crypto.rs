@@ -127,9 +127,9 @@ mod test {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"some plaintext");
         crypto.encrypt(&mut buf);
-        println!("{:?}", buf);
+        println!("{buf:?}");
         crypto.decrypt(&mut buf);
-        println!("{:?}", buf);
+        println!("{buf:?}");
         assert_eq!(b"some plaintext", &buf[..]);
     }
 }

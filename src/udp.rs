@@ -45,7 +45,7 @@ impl UdpListener {
                     if tx.is_closed() {
                         should_clean = true;
                     } else if tx.try_send(buf).is_err() {
-                        log::debug!("the channel got jammed {}", addr);
+                        log::debug!("the channel got jammed {addr}");
                     }
                 } else {
                     let (tx, rx) = bounded(0x200);

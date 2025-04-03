@@ -35,7 +35,7 @@ async fn client<C: Crypto + 'static>(
     let listener = TcpListener::bind(local).await?;
     loop {
         let (mut tcp_stream, addr) = listener.accept().await?;
-        log::info!("tcp socket accepted: {}", addr);
+        log::info!("tcp socket accepted: {addr}");
         let mut kcp_stream = kcp_handle.connect().await?;
         log::info!("kcp tunnel established");
         tokio::spawn(async move {
@@ -75,7 +75,7 @@ async fn server<C: Crypto + 'static>(
                     let mut kcp_stream = kcp_handle.accept().await?;
                     log::info!("kcp tunnel established");
                     let mut tcp_stream = TcpStream::connect(addr.clone()).await?;
-                    log::info!("tunneling to {}", addr);
+                    log::info!("tunneling to {addr}");
                     tokio::spawn(async move {
                         tokio::io::copy_bidirectional(&mut kcp_stream, &mut tcp_stream).await?;
                         tcp_stream.shutdown().await?;
@@ -89,7 +89,7 @@ async fn server<C: Crypto + 'static>(
         let mut to_remove = Vec::with_capacity(sessions.len());
         for (idx, (handle, t)) in sessions.iter().enumerate() {
             let count = handle.get_stream_count().await;
-            log::debug!("count = {}", count);
+            log::debug!("count = {count}");
             if count == 0 {
                 log::info!("removing kcp handle");
                 to_remove.push(idx);
@@ -194,9 +194,9 @@ async fn main() {
 
     if matches.get_flag("client") {
         log::info!("ap-kcp-tun client");
-        log::info!("listening on {}, tunneling via {}", local, remote);
-        log::info!("algorithm: {}", algorithm_name);
-        log::info!("settings: {:?}", config);
+        log::info!("listening on {local}, tunneling via {remote}");
+        log::info!("algorithm: {algorithm_name}");
+        log::info!("settings: {config:?}");
         let remote_addrs = lookup_host(remote).await.unwrap();
         for remote in remote_addrs {
             match remote {
@@ -220,13 +220,13 @@ async fn main() {
         }
     } else if matches.get_flag("server") {
         log::info!("ap-kcp-tun server");
-        log::info!("listening on {}, tunneling to {}", local, remote);
-        log::info!("algorithm: {}", algorithm_name);
-        log::info!("settings: {:?}", config);
+        log::info!("listening on {local}, tunneling to {remote}");
+        log::info!("algorithm: {algorithm_name}");
+        log::info!("settings: {config:?}");
         let udp = UdpSocket::bind(local).await.unwrap();
         server(remote.to_string(), udp, aead, config).await.unwrap();
     } else {
-        log::warn!("neither --server or --client is specified")
+        log::warn!("neither --server or --client is specified");
     }
 }
 

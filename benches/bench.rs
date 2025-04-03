@@ -21,8 +21,7 @@ async fn get_udp_pair() -> (UdpSocket, UdpSocket) {
 }
 
 fn random_data() -> Arc<Vec<u8>> {
-    let mut buf = Vec::new();
-    buf.resize(DATA_SIZE, 0);
+    let mut buf = vec![0; DATA_SIZE];
     rand::rng().fill_bytes(&mut buf);
     Arc::new(buf)
 }
@@ -40,8 +39,7 @@ pub async fn udp(data: Arc<Vec<u8>>) {
         let session = listener.accept().await;
         let handle2 = ap_kcp::KcpHandle::new(session, ap_kcp::KcpConfig::default()).unwrap();
         let mut stream2 = handle2.accept().await.unwrap();
-        let mut buf = Vec::new();
-        buf.resize(data1.len(), 0);
+        let mut buf = vec![0; data1.len()];
         stream2.read_exact(&mut buf).await.unwrap();
         stream2.shutdown().await.unwrap();
     });
@@ -64,8 +62,7 @@ pub fn udp_crypto(data: Arc<Vec<u8>>) {
                 let session = CryptoLayer::wrap(session, aead);
                 let handle2 = ap_kcp::KcpHandle::new(session, ap_kcp::KcpConfig::default()).unwrap();
                 let mut stream2 = handle2.accept().await.unwrap();
-                let mut buf = Vec::new();
-                buf.resize(data1.len(), 0);
+                let mut buf = vec![0; data1.len()];
                 stream2.read_exact(&mut buf).await.unwrap();
                 stream2.shutdown().await.unwrap();
             });
@@ -91,7 +88,7 @@ pub fn xmit_benchmark(c: &mut Criterion) {
         let guard = pprof::ProfilerGuard::new(1000).unwrap();
         if let Ok(report) = guard.report().build() {
             println!("report: {:?}", &report);
-        };
+        }
         group.bench_function("udp-flamegraph", |b| b.iter(|| udp(data.clone())));
         if let Ok(report) = guard.report().build() {
             let file = File::create("udp.svg").unwrap();
@@ -106,9 +103,9 @@ pub fn xmit_benchmark(c: &mut Criterion) {
         let guard = pprof::ProfilerGuard::new(1000).unwrap();
         if let Ok(report) = guard.report().build() {
             println!("report: {:?}", &report);
-        };
+        }
         group.bench_function("udp-crypto-flamegraph", |b| {
-            b.iter(|| udp_crypto(data.clone()))
+            b.iter(|| udp_crypto(data.clone()));
         });
         if let Ok(report) = guard.report().build() {
             let file = File::create("udp-crypto.svg").unwrap();

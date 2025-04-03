@@ -69,9 +69,9 @@ impl<'de> serde::Deserialize<'de> for Congestion {
 
 bitflags! {
     struct CloseFlags: u8 {
-        const TX_CLOSING = 0b00000001;
-        const TX_CLOSED = 0b00000011;
-        const RX_CLOSED = 0b00000100;
+        const TX_CLOSING = 0b0000_0001;
+        const TX_CLOSED = 0b0000_0011;
+        const RX_CLOSED = 0b0000_0100;
         const CLOSED = Self::TX_CLOSED.bits() | Self::RX_CLOSED.bits();
     }
 }
@@ -147,36 +147,6 @@ impl KcpConfig {
             ));
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test {
-    #[cfg(feature = "serde_support")]
-    #[test]
-    fn deserialize() {
-        use super::*;
-        let s = r#"
-    max_interval = 10
-    min_interval = 100
-    nodelay = false
-    mtu = 1350
-    mss = 1331
-    fast_rexmit_thresh = 3
-    fast_ack_thresh = 32
-    congestion = "loss_tolerance"
-    max_rexmit_time = 32
-    min_rto = 20
-    send_window_size = 0x800
-    recv_window_size = 0x800
-    timeout = 5000
-    keep_alive_interval = 1500
-    name = ""
-    "#;
-        let config = toml::from_str::<KcpConfig>(s).unwrap();
-        assert_eq!(config.max_interval, 10);
-        assert_eq!(config.min_interval, 100);
-        assert_eq!(config.congestion, Congestion::LossTolerance);
     }
 }
 
@@ -404,7 +374,7 @@ impl KcpCore {
     fn handle_push(&mut self, segment: &KcpSegment) {
         if i32diff(
             segment.sequence,
-            self.recv_next + self.config.recv_window_size as u32,
+            self.recv_next + u32::from(self.config.recv_window_size),
         ) < 0
         {
             self.ack_list
@@ -446,7 +416,7 @@ impl KcpCore {
 
         for segment in segments {
             assert_eq!(segment.stream_id, self.stream_id);
-            log::trace!("input segment: {:?}", segment);
+            log::trace!("input segment: {segment:?}");
             self.remote_window_size = segment.recv_window_size;
             self.remove_send_window_until(segment.recv_next);
             self.update_unack();
@@ -513,7 +483,7 @@ impl KcpCore {
         self.send_queue.is_empty() && self.send_window.is_empty()
     }
 
-    pub fn poll_send(&mut self, cx: &Context, payload: &[u8]) -> Poll<KcpResult<()>> {
+    pub fn poll_send(&mut self, cx: &Context<'_>, payload: &[u8]) -> Poll<KcpResult<()>> {
         if self.close_state.contains(CloseFlags::TX_CLOSING) {
             return Poll::Ready(Err(KcpError::Shutdown(format!(
                 "poll_send on a closing kcp core: {}",
@@ -552,7 +522,7 @@ impl KcpCore {
         }
     }
 
-    pub fn poll_recv(&mut self, cx: &Context) -> Poll<KcpResult<VecDeque<Bytes>>> {
+    pub fn poll_recv(&mut self, cx: &Context<'_>) -> Poll<KcpResult<VecDeque<Bytes>>> {
         self.now = now_millis();
         self.last_active = self.now;
 
@@ -572,7 +542,7 @@ impl KcpCore {
         }
     }
 
-    pub fn poll_flush(&mut self, cx: &Context) -> Poll<KcpResult<()>> {
+    pub fn poll_flush(&mut self, cx: &Context<'_>) -> Poll<KcpResult<()>> {
         if self.close_state.contains(CloseFlags::TX_CLOSING) {
             return Poll::Ready(Err(KcpError::Shutdown(format!(
                 "poll_recv on a closing kcp core: {}",
@@ -603,7 +573,7 @@ impl KcpCore {
         }
     }
 
-    pub fn poll_close(&mut self, cx: &Context) -> Poll<KcpResult<()>> {
+    pub fn poll_close(&mut self, cx: &Context<'_>) -> Poll<KcpResult<()>> {
         self.now = now_millis();
         if !self.close_state.contains(CloseFlags::TX_CLOSING) {
             self.close_state.set(CloseFlags::TX_CLOSING, true);
@@ -710,7 +680,7 @@ impl KcpCore {
                 } else if loss_rate <= 5 {
                     self.congestion_window_size += self.congestion_window_size / 4;
                 }
-                log::trace!("loss_rate = {}", loss_rate);
+                log::trace!("loss_rate = {loss_rate}");
                 self.congestion_window_size = bound(
                     MIN_WINDOW_SIZE,
                     self.congestion_window_size,
@@ -758,7 +728,7 @@ impl KcpCore {
         let recv_window_unused = self.recv_window_unused();
 
         // Push data into sending window
-        while i32diff(self.send_next, self.send_unack + final_window_size as u32) < 0 {
+        while i32diff(self.send_next, self.send_unack + u32::from(final_window_size)) < 0 {
             match self.send_queue.pop_front() {
                 Some(data) => {
                     let segment = KcpSegment {
@@ -893,7 +863,7 @@ impl KcpCore {
             interval = cmp::min(delta as u32, interval);
         }
         interval = cmp::max(interval, self.config.min_interval);
-        log::trace!("dynamic interval = {}", interval);
+        log::trace!("dynamic interval = {interval}");
         interval
     }
 
@@ -953,5 +923,35 @@ impl KcpCore {
             rexmit_counter: 0,
             last_measure: now,
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[cfg(feature = "serde_support")]
+    #[test]
+    fn deserialize() {
+        use super::*;
+        let s = r#"
+    max_interval = 10
+    min_interval = 100
+    nodelay = false
+    mtu = 1350
+    mss = 1331
+    fast_rexmit_thresh = 3
+    fast_ack_thresh = 32
+    congestion = "loss_tolerance"
+    max_rexmit_time = 32
+    min_rto = 20
+    send_window_size = 0x800
+    recv_window_size = 0x800
+    timeout = 5000
+    keep_alive_interval = 1500
+    name = ""
+    "#;
+        let config = toml::from_str::<KcpConfig>(s).unwrap();
+        assert_eq!(config.max_interval, 10);
+        assert_eq!(config.min_interval, 100);
+        assert_eq!(config.congestion, Congestion::LossTolerance);
     }
 }

@@ -39,7 +39,7 @@ impl Drop for KcpStream {
         block_in_place(|| {
             Handle::current().block_on(async move {
                 if let Err(e) = self.core.lock().await.try_close() {
-                    log::trace!("try_close failed {}", e);
+                    log::trace!("try_close failed {e}");
                 }
             });
         });
@@ -54,20 +54,17 @@ impl KcpStream {
         core: Arc<Mutex<KcpCore>>,
         future_storage: &mut Option<MutexOwnedGuardFuture<KcpCore>>,
     ) -> Poll<MutexOwnedGuard<KcpCore>> {
-        match future_storage {
-            Some(fut) => {
-                let guard = ready!(Pin::new(fut).poll(cx));
-                *future_storage = None;
-                Poll::Ready(guard)
-            }
-            None => {
-                let mut fut = core.lock_owned();
-                match Pin::new(&mut fut).poll(cx) {
-                    Poll::Ready(guard) => Poll::Ready(guard),
-                    Poll::Pending => {
-                        *future_storage = Some(fut);
-                        Poll::Pending
-                    }
+        if let Some(fut) = future_storage {
+            let guard = ready!(Pin::new(fut).poll(cx));
+            *future_storage = None;
+            Poll::Ready(guard)
+        } else {
+            let mut fut = core.lock_owned();
+            match Pin::new(&mut fut).poll(cx) {
+                Poll::Ready(guard) => Poll::Ready(guard),
+                Poll::Pending => {
+                    *future_storage = Some(fut);
+                    Poll::Pending
                 }
             }
         }
@@ -78,7 +75,7 @@ impl AsyncRead for KcpStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf,
+        buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         loop {
             if self.read_buffer.is_some() {
@@ -247,7 +244,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
                 KcpError::Shutdown("cleaning but the kcp handle is closed".to_string())
             })?;
             sessions.lock().await.remove(&stream_id);
-            log::debug!("cleaned {}", stream_id);
+            log::debug!("cleaned {stream_id}");
         }
     }
 
@@ -265,12 +262,12 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
                     if let KcpError::Shutdown(ref s) = e {
                         // Release the mutex
                         drop(core);
-                        log::warn!("kcp core is shutting down: {}", s);
+                        log::warn!("kcp core is shutting down: {s}");
                         let _ = dead_tx.send(stream_id).await;
                         return Err(e);
                     }
                     // Sleep and continue
-                    log::error!("flush error: {}, retrying...", e);
+                    log::error!("flush error: {e}, retrying...");
                     let r = rand::random::<u32>() % core.config.max_interval;
                     core.config.max_interval + r
                 } else {
@@ -278,7 +275,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
                 }
             };
             if tokio::time::timeout(
-                Duration::from_millis(interval as u64),
+                Duration::from_millis(u64::from(interval)),
                 flush_notify_rx.recv(),
             )
             .await
@@ -300,7 +297,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
             let packet = match io.recv_packet().await {
                 Ok(packet) => packet,
                 Err(e) => {
-                    log::error!("recv error: {}", e);
+                    log::error!("recv error: {e}");
                     dead_tx.close();
                     accept_tx.close();
                     return Err(KcpError::IoError(e));
@@ -335,7 +332,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
                         segments.push(segment);
                     }
                     Err(e) => {
-                        log::error!("malformed packet: {}", e);
+                        log::error!("malformed packet: {e}");
                         invalid_packet = true;
                         break;
                     }
@@ -368,7 +365,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
                     log::trace!("new kcp stream");
                     core
                 } else {
-                    log::error!("unknown stream_id {}", stream_id);
+                    log::error!("unknown stream_id {stream_id}");
                     continue;
                 }
             };
@@ -385,7 +382,7 @@ impl<IO: KcpIo + Send + Sync + 'static> KcpHandle<IO> {
                 if accept_tx.send(stream).await.is_err() {
                     log::error!("kcp handle closed");
                     return Ok(());
-                };
+                }
             }
 
             core.lock().await.input(&segments);

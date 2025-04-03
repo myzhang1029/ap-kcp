@@ -55,8 +55,7 @@ pub mod test {
             }
             stream1.flush().await.unwrap();
             log::debug!("stream1 flushed");
-            let mut buf = Vec::new();
-            buf.resize(0x1000, 0u8);
+            let mut buf = vec![0; 0x1000];
             for i in 0..255 {
                 stream1.read_exact(&mut buf).await.unwrap();
                 assert_eq!(i as u8, buf[99]);
@@ -66,8 +65,7 @@ pub mod test {
         });
 
         let mut stream2 = kcp2.accept().await.unwrap();
-        let mut buf = Vec::new();
-        buf.resize(0x1000, 0u8);
+        let mut buf = vec![0; 0x1000];
         for i in 0..255 {
             stream2.read_exact(&mut buf).await.unwrap();
             assert_eq!(i as u8, buf[99]);
@@ -81,8 +79,7 @@ pub mod test {
     }
 
     fn random_data() -> Arc<Vec<u8>> {
-        let mut buf = Vec::new();
-        buf.resize(0x500, 0);
+        let mut buf = vec![0; 0x500];
         rand::rng().fill_bytes(&mut buf);
         Arc::new(buf)
     }
@@ -98,8 +95,7 @@ pub mod test {
                 let mut stream1 = kcp1.connect().await.unwrap();
                 let data = data1.clone();
                 tasks.spawn(async move {
-                    let mut buf = Vec::new();
-                    buf.resize(data.len(), 0u8);
+                    let mut buf = vec![0; data.len()];
                     stream1.write_all(&data).await.unwrap();
                     stream1.read_exact(&mut buf).await.unwrap();
                     assert_eq!(&buf[..], &data[..]);
@@ -119,8 +115,7 @@ pub mod test {
                 let mut stream2 = kcp2.accept().await.unwrap();
                 let data = data2.clone();
                 tasks.spawn(async move {
-                    let mut buf = Vec::new();
-                    buf.resize(data.len(), 0u8);
+                    let mut buf = vec![0; data.len()];
                     stream2.read_exact(&mut buf).await.unwrap();
                     assert_eq!(&buf[..], &data[..]);
                     stream2.write_all(&data).await.unwrap();
@@ -174,10 +169,10 @@ pub mod test {
             packet.extend_from_slice(buf);
             tokio::spawn(async move {
                 sleep(Duration::from_millis(delay)).await;
-                if !rand::random_bool(loss) {
-                    let _ = tx.send(packet).await;
-                } else {
+                if rand::random_bool(loss) {
                     log::debug!("packet lost XD");
+                } else {
+                    let _ = tx.send(packet).await;
                 }
             });
             Ok(())
@@ -243,8 +238,7 @@ pub mod test {
         let kcp1 = KcpHandle::new(io1, KcpConfig::default()).unwrap();
         let mut stream1 = kcp1.connect().await.unwrap();
         drop(kcp1);
-        let mut buf = Vec::new();
-        buf.resize(100, 0u8);
+        let mut buf = vec![0; 100];
         assert!(stream1.read_exact(&mut buf).await.is_err());
     }
 
@@ -257,7 +251,7 @@ pub mod test {
         assert_eq!(kcp1.get_stream_count().await, 1);
         drop(stream1);
         sleep(Duration::from_millis(
-            1000 + KcpConfig::default().timeout as u64,
+            1000 + u64::from(KcpConfig::default().timeout),
         ))
         .await;
         assert_eq!(kcp1.get_stream_count().await, 0);
@@ -271,8 +265,7 @@ pub mod test {
         let kcp1 = KcpHandle::new(io1, config.clone()).unwrap();
         let _kcp2 = KcpHandle::new(io2, config.clone()).unwrap();
         let mut stream1 = kcp1.connect().await.unwrap();
-        let mut buf = Vec::new();
-        buf.resize(100, 0u8);
+        let mut buf = vec![0; 100];
         assert!(stream1.read_exact(&mut buf).await.is_err());
     }
 
@@ -352,8 +345,7 @@ pub mod test {
             let session = io2.accept().await;
             let handle2 = KcpHandle::new(session, KcpConfig::default()).unwrap();
             let mut stream2 = handle2.accept().await.unwrap();
-            let mut buf = Vec::new();
-            buf.resize(data1.len(), 0);
+            let mut buf = vec![0; data1.len()];
             stream2.read_exact(&mut buf).await.unwrap();
             assert_eq!(&buf[..], &data1[..]);
             stream2.shutdown().await.unwrap();
