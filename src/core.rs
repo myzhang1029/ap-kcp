@@ -728,7 +728,11 @@ impl KcpCore {
         let recv_window_unused = self.recv_window_unused();
 
         // Push data into sending window
-        while i32diff(self.send_next, self.send_unack + u32::from(final_window_size)) < 0 {
+        while i32diff(
+            self.send_next,
+            self.send_unack + u32::from(final_window_size),
+        ) < 0
+        {
             match self.send_queue.pop_front() {
                 Some(data) => {
                     let segment = KcpSegment {

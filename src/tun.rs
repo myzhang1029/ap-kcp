@@ -170,9 +170,6 @@ async fn main() {
         .version("0.1.0")
         .get_matches();
 
-    let thread = num_cpus::get() + 2;
-    std::env::set_var("SMOL_THREADS", thread.to_string());
-
     let level = matches.get_one::<String>("level").unwrap();
     let _ = env_logger::builder()
         .filter_module("ap_kcp", get_level(level))
@@ -201,7 +198,9 @@ async fn main() {
         for remote in remote_addrs {
             match remote {
                 SocketAddr::V4(remote) => {
-                    let Ok(udp) = UdpSocket::bind("0.0.0.0:0").await else {continue;};
+                    let Ok(udp) = UdpSocket::bind("0.0.0.0:0").await else {
+                        continue;
+                    };
                     if udp.connect(remote).await.is_err() {
                         continue;
                     }
@@ -209,7 +208,9 @@ async fn main() {
                     break;
                 }
                 SocketAddr::V6(remote) => {
-                    let Ok(udp) = UdpSocket::bind("[::]:0").await else {continue;};
+                    let Ok(udp) = UdpSocket::bind("[::]:0").await else {
+                        continue;
+                    };
                     if udp.connect(remote).await.is_err() {
                         continue;
                     }
@@ -232,7 +233,6 @@ async fn main() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn simple_iperf() {
-    std::env::set_var("SMOL_THREADS", "8");
     let _ = env_logger::builder()
         .filter_module("ap_kcp", LevelFilter::Debug)
         .try_init();

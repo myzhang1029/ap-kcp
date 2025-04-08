@@ -26,9 +26,7 @@ fn random_data() -> Arc<Vec<u8>> {
     Arc::new(buf)
 }
 
-fn init() {
-    std::env::set_var("SMOL_THREADS", "8");
-}
+fn init() {}
 
 pub async fn udp(data: Arc<Vec<u8>>) {
     let (io1, io2) = get_udp_pair().await;
@@ -60,7 +58,8 @@ pub fn udp_crypto(data: Arc<Vec<u8>>) {
                 let session = listener.accept().await;
                 let aead = AeadCrypto::new(b"keykeykey", &aead::AES_256_GCM);
                 let session = CryptoLayer::wrap(session, aead);
-                let handle2 = ap_kcp::KcpHandle::new(session, ap_kcp::KcpConfig::default()).unwrap();
+                let handle2 =
+                    ap_kcp::KcpHandle::new(session, ap_kcp::KcpConfig::default()).unwrap();
                 let mut stream2 = handle2.accept().await.unwrap();
                 let mut buf = vec![0; data1.len()];
                 stream2.read_exact(&mut buf).await.unwrap();

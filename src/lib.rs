@@ -37,7 +37,6 @@ pub mod test {
     }
 
     pub fn init() {
-        std::env::set_var("SMOL_THREADS", "8");
         let _ = env_logger::builder()
             .filter_module("ap_kcp", LevelFilter::Debug)
             .try_init();
